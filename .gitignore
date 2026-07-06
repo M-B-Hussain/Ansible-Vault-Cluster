@@ -1,0 +1,3 @@
+.vault_pass
+nginx.conf.j2
+rotate-vault.sh

@@ -1,0 +1,85 @@
+---
+# =========================================================================
+# PLAY 1: Configure Application Servers (app01 and app02)
+# =========================================================================
+- name: Configure Web Application Backends
+  hosts: webservers
+  become: true  #Run tasks with sudo root privileges
+  vars_files:
+    - vars.yml  #Tells Ansible to load your encrypted secrets file
+  tasks:
+    - name: Ensure system cache is updated
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Apache Web Server
+      apt:
+        name: apache2
+        state: present
+
+    - name: Deploy Dynamic Index Webpage from Template
+      template:
+        src: index.html.j2
+        dest: /var/www/html/index.html
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    #THIS TASK SIMULATES USING THE DECRYPTED VAULT VARIABLE
+    - name: Simulate protected application config file
+      copy:
+        content: "db_pass={{ db_password }}"
+        dest: /var/www/html/app_config.txt
+        owner: www-data
+        group: www-data
+        mode: '0600'
+
+# =========================================================================
+# PLAY 2: Configure Load Balancer Server (lb01)
+# =========================================================================
+- name: Configure Nginx Load Balancer Front
+  hosts: loadbalancers
+  become: true
+  tasks:
+    - name: Install Nginx Load Balancer
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+      become: true
+
+    - name: Ensure Nginx is started and enabled on boot
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Map application hostnames to local hosts file
+      ansible.builtin.lineinfile:
+         path: /etc/hosts
+         line: "{{ hostvars[item]['ansible_host'] }} {{ item }}"
+         state: present
+      loop:
+           - app01
+           - app02
+      become: true
+
+    - name: Remove Default Nginx Configuration Link
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Deploy Custom Load Balancer Routing Settings
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/sites-enabled/lb_proxy.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    # This task will now cleanly restart the active service!
+    - name: Restart Nginx to apply proxy upstream settings
+      service:
+        name: nginx
+        state: restarted
