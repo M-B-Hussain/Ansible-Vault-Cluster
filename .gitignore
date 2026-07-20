@@ -1,1 +1,7 @@
 .vault_pass
+recycled/
+.vagrant
+nginx.conf.j2
+.terraform/
+**/.terraform/
+*.packages/

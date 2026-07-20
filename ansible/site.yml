@@ -1,0 +1,72 @@
+---
+# =========================================================================
+# PLAY 1: Configure Application Servers (app01 and app02)
+# =========================================================================
+- name: Configure Web Application Backends
+  hosts: webservers
+  become: true  #Run tasks with sudo root privileges
+  vars_files:
+    - vars.yml  #Tells Ansible to load your encrypted secrets file
+  tasks:
+    - name: Ensure system cache is updated
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Apache Web Server
+      apt:
+        name: apache2
+        state: present
+
+    - name: Deploy Dynamic Index Webpage from Template
+      template:
+        src: index.html.j2
+        dest: /var/www/html/index.html
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    #THIS TASK SIMULATES USING THE DECRYPTED VAULT VARIABLE
+    - name: Simulate protected application config file
+      copy:
+        content: "db_pass={{ db_password }}"
+        dest: /var/www/html/app_config.txt
+        owner: www-data
+        group: www-data
+        mode: '0600'
+
+# =========================================================================
+# CLOUD-NATIVE PLAY: Configure Application Server Blueprint Image
+# =========================================================================
+- name: Configure Web Application Backends
+  hosts: all
+  become: true  # Run tasks with sudo root privileges
+  vars_files:
+    - vars.yml  # Tells Ansible to load your encrypted secrets file
+  tasks:
+    - name: Ensure system cache is updated
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Apache Web Server
+      apt:
+        name: apache2
+        state: present
+
+    - name: Deploy Dynamic Index Webpage from Template
+      template:
+        src: index.html.j2
+        dest: /var/www/html/index.html
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    # THIS TASK SIMULATES USING THE DECRYPTED VAULT VARIABLE
+    - name: Simulate protected application config file
+      copy:
+        content: "db_pass={{ db_password }}"
+        dest: /var/www/html/app_config.txt
+        owner: www-data
+        group: www-data
+        mode: '0600'

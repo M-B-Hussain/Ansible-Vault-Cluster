@@ -1,50 +1,35 @@
 # Automated Immutable Infrastructure Cluster with Ansible Vault
 
-This repository contains the Infrastructure-as-Code (IaC) configuration to automatically provision, configure, and secure a multi-node, load-balanced web application cluster. Using Vagrant and Ansible, the environment demonstrates high-availability deployment patterns, local hostname mapping, and cryptographic secret isolation.
+This repository contains Infrastructure-as-Code (IaC) and automation to provision, configure, and secure a multi-node, load‑balanced web application cluster on AWS. It uses Terraform to create AWS resources and Ansible (with Ansible Vault) to provision and configure instances. The project demonstrates high-availability deployment patterns, private/public subnet isolation, and encrypted secret management.
 
 ---
 
 ## System Architecture
 
-The environment simulates a professional multi-tier deployment architecture contained completely within a private virtual network (`192.168.56.0/24`).
+The deployment targets AWS and organizes resources across public and private subnets inside an AWS VPC.
 
+  * Public Application Load Balancer (ALB)
 
-  * Public Gateway (Port 80)
+    * Public entry point for HTTP traffic (port 80) and forwards requests to the private application fleet.
 
-    * Forwards traffic directly to the proxy frontend
+  * Application Fleet (Auto Scaling Group)
 
-  * Frontend Tier (lb01 | 192.168.56.10)
+    * Back-end application nodes run from a Launch Template (AMI built externally or provided via the `target_ami_id` Terraform variable).
 
-    * Engine: Nginx Reverse Proxy
+    * Instances are placed in private subnets and receive traffic exclusively from the ALB via a dedicated security group.
 
-    * Upstream Cluster Configuration: myapp pool mapping
+    * Autoscaling configuration controls desired/min/max instance count and handles replacement/rollout behavior.
 
-    * Target Routing Strategy: Round-Robin Load Balancing
+  * Configuration & Secrets
 
-    * Equally alternates distribution profiles to available backend hosts
+    * Ansible (invoked from a control host that can reach the VPC — e.g., a bastion or CI runner with VPC access) configures Apache and deploys templated content.
 
-  * Backend Application Tier (webservers group)
-
-    * Node 01 (app01 | 192.168.56.11)
-
-      * Engine: Apache HTTP Daemon (apache2)
-
-      * Serving Element: Dynamic Jinja2 index.html file
-
-      * Local Security Asset: Protected app_config.txt (Injected securely from Ansible Vault variable db_password)
-
-    * Node 02 (app02 | 192.168.56.12)
-
-      * Engine: Apache HTTP Daemon (apache2)
-
-      * Serving Element: Dynamic Jinja2 index.html file
-
-      * Local Security Asset: Protected app_config.txt (Injected securely from Ansible Vault variable db_password)
+    * Secrets (like `db_password`) are stored encryptically in `vars.yml` and decrypted at runtime using Ansible Vault.
 
 ### Architectural Components:
-1. **Control Node (Host Machine):** Executes Ansible playbooks, handles decryption operations in-memory via Ansible Vault, and manages orchestration lifecycle.
-2. **Load Balancer Layer (`lb01`):** Runs an upstream-proxied Nginx server distributing inbound connection handshakes across downstream services.
-3. **Application Layer (`app01` / `app02`):** Redundant standalone Apache HTTP backend environments processing HTTP requests independently.
+1. **Control Node (Operator/CI Runner):** Runs Terraform to provision AWS resources and runs Ansible to configure instances. The control node must have network access to the target VPC (bastion, VPN, or AWS Systems Manager).
+2. **ALB (Application Load Balancer):** Public-facing HTTP entrypoint created by Terraform and configured to forward to the application Target Group.
+3. **Auto Scaling Group & Launch Template:** Manages the lifecycle of the application nodes using the supplied AMI and instance type.
 
 ---
 
@@ -59,122 +44,117 @@ Through step-by-step optimization and debugging, the following engineering miles
 
 ---
 
-## 🛠️ Repository File Structure
-
-```text
-.
-├── site.yml                 # Master automation playbook containing configuration plays
-├── vars.yml                 # Encrypted Ansible Vault variable file containing secrets
-├── nginx.conf.j2            # Jinja2 template file for Nginx Load Balancer settings
-├── index.html.j2            # Dynamic webpage template for Apache backends
-└── .vault_pass              # Local hidden password tracking file
-└── rotate-vault.sh          # Create new passwords whenever you want to keep it a secret
-
-```
-
----
-
 ## Deployment & Operational Guide
 
 ### Prerequisites
 
-Ensure your local host machine has Ansible installed:
+Ensure the control host (your laptop or CI runner) has the following installed and configured:
+
+- Terraform (>= 1.5.0)
+- AWS CLI configured with credentials that can create the required resources (aws configure)
+- Ansible (2.9+ recommended)
+- Optional: jq (useful for parsing CLI output)
+
+Also ensure your AWS_PROFILE and AWS_REGION are set if you use a named profile. Example:
 
 ```bash
-sudo apt update && sudo apt install ansible -y
-
+export AWS_PROFILE=default
+export AWS_REGION=eu-central-1
 ```
 
-### Start Vagrant VMs
+### 1. Provision AWS Infrastructure (Terraform)
 
-Before running Ansible playbooks make sure the Vagrant virtual machines are running so the control node can reach the guests over the host-only network. Start all VMs with:
+The Terraform code in the `terraform/` directory creates the VPC, subnets, ALB, target group, security groups and an Auto Scaling Group using a Launch Template.
+
+1. Change into the terraform directory:
 
 ```bash
-vagrant up
-# or start specific VMs:
-vagrant up lb01 app01 app02
+cd terraform
 ```
 
-Verify the machines are up and reachable:
+2. Initialize Terraform and install providers:
 
 ```bash
-vagrant status
-vagrant ssh app01
-# or test SSH directly with the Vagrant key:
-ssh -i .vagrant/machines/app01/virtualbox/private_key vagrant@192.168.56.11
+terraform init
 ```
 
-Once the VMs are confirmed running, proceed to run the playbook as described below.
-
-### 1. View or Modify Protected Secrets
-
-The variable storage containing sensitive application details (`db_password`) is cryptographically protected. To view or edit it without removing security properties, run:
+3. Plan and apply. You must provide the AMI ID to use for the Launch Template via the `target_ami_id` variable. Example (replace with your AMI):
 
 ```bash
-# To safely view the secrets file
+terraform plan 
+terraform apply 
+```
+
+Alternatively create a `terraform.tfvars` file with values for `aws_region` and `target_ami_id` and run `terraform apply`.
+
+Note: If your control machine cannot reach private subnets, the Ansible provisioning step must be executed from a host that has network access to the VPC (bastion host, CI runner inside the VPC, or via AWS SSM).
+
+### 2. Finding the Load Balancer (ALB) endpoint
+
+After a successful apply, the ALB DNS name is visible in the AWS Console under EC2 > Load Balancers. To get it via AWS CLI run:
+
+```bash
+aws elbv2 describe-load-balancers --names production-app-alb --query 'LoadBalancers[0].DNSName' --output text --region ${AWS_REGION}
+```
+
+Use the returned DNS name to test HTTP traffic.
+
+### 3. Running Ansible to configure instances
+
+The repository's Ansible playbook (`site.yml`) expects target hosts in an inventory under the `webservers` group. Because the Auto Scaling Group places instances into private subnets without public IPs, run Ansible from a control host that has network access to the private IPs (bastion host, VPN, or CI runner).
+
+Create a simple `inventory.ini` with the private IPs of the instances. You can obtain the private IPs via the AWS CLI (filter by tag `Name=asg-app-node`) or by adding Terraform outputs to the configuration.
+
+Example inventory.ini (replace with actual private IPs and key path):
+
+```ini
+[webservers]
+10.0.1.12 ansible_user=ubuntu ansible_private_key_file=~/.ssh/mykey.pem
+10.0.2.15 ansible_user=ubuntu ansible_private_key_file=~/.ssh/mykey.pem
+```
+
+Run the playbook (interactive vault pass):
+
+```bash
+ansible-playbook -i inventory.ini site.yml --ask-vault-pass
+```
+
+Or, to run non-interactively using a vault password file (ensure this file is stored securely and not committed):
+
+```bash
+ansible-playbook -i inventory.ini site.yml --vault-password-file .vault_pass
+```
+
+### 4. Managing secrets (Ansible Vault)
+
+To view or edit the encrypted `vars.yml`:
+
+```bash
 ansible-vault view vars.yml
-
-# To edit the secrets file inline
 ansible-vault edit vars.yml
-
 ```
 
-### 2. Automated Secrets Rotation (Vault Re-keying)
-
-To rotate operational credentials within `vars.yml` without interrupting live node states or requiring interactive terminal typing, use the automated re-key workflow script `rotate-vault.sh`.
-
-#### Ensure the automation script has execution permissions:
-
-   ```bash
-   chmod +x rotate-vault.sh
-   ```
-Generate or write your new password into a temporary file named .vaultpass_new in the project root directory.
-
-#### Trigger the script from your terminal:
+To rotate the vault password using the provided `rotate-vault.sh` script, ensure it is executable:
 
 ```bash
+chmod +x rotate-vault.sh
 ./rotate-vault.sh
 ```
-### 3. Manual Execution (Interactive Mode)
 
-To trigger the deployment automation cluster and provide your decryption credentials manually at the command prompt:
+(Review the script before running to ensure it meets your operational policies.)
 
-```bash
-ansible-playbook site.yml --ask-vault-pass
+### 5. Verifying the deployment
 
-```
-
-### 4. Automated Execution (CI/CD / Hands-Free Mode)
-
-To run the automated deployment pipeline without manual terminal interactive steps, read the passphrase string directly via an isolated file pointer:
+Once the ALB DNS is known, verify HTTP responses using curl:
 
 ```bash
-ansible-playbook site.yml --vault-password-file .vault_pass
-
+curl http://<ALB_DNS_NAME>
 ```
 
-### 5. Verifying Load Balancer Multi-Node Distribution
+You can run repeated requests to confirm responses are served by different backend instances (the ALB will forward to the target group behind the scenes).
 
-To confirm that Nginx is balancing traffic evenly between both backend targets in real time, run a standard HTTP request loop against the load balancer IP:
+### Notes & Best Practices
 
-
-
-#### Option A: Target "Server" (Simplest)
-
-```bash
-for i in {1..6}; do curl -s http://192.168.56.10 | grep -i "Server"; done
-```
-#### Option B: Target "app" (Matches hostnames)
-
-```bash
-for i in {1..6}; do curl -s http://192.168.56.10 | grep -i "app"; done
-```
-*Expected output should cycle cleanly, showing responses alternating between `app01` and `app02`.*
-
-#### Option C: View the Whole Page (No grep at all)
-
-If you want to see exactly what Nginx is sending back without filtering anything out, drop the grep entirely:
-
-```bash
-for i in {1..3}; do curl -s http://192.168.56.10; echo "----------------"; done
-```
+- Do not commit `.vault_pass` or other secret material to version control. Keep vault password files in a secure store.
+- The `target_ami_id` should reference a hardened image with the expected OS and SSH user (e.g., `ubuntu`) so Ansible can connect successfully.
+- For fully hands-free provisioning, consider adding Terraform outputs for instance private IPs and ALB DNS, then generate an inventory automatically for Ansible or use AWS SSM to run Ansible without SSH access.
